@@ -1,0 +1,100 @@
+---
+- name: MediaWiki Setup
+  hosts: all
+  remote_user: ec2-user
+  become: yes
+  vars_files:
+    - vars.yml
+  tasks:
+  - name: Reset module
+    command: "dnf module reset php -y"
+  - name: Enabling Module
+    command: "dnf module enable php:7.4 -y"
+    
+  - name: Installing python3, apache, php:7.4, php modules, mariadb
+    dnf:
+      name:
+        - python3
+        - httpd
+        - php
+        - php-mysqlnd
+        - php-gd
+        - php-xml
+        - mariadb-server
+        - mariadb
+        - php-mbstring
+        - php-json
+        - php-intl
+      state: latest
+
+  - name: Make sure pymysql module is present
+    pip:
+      name: 
+        - pymysql
+        - mysql-connector-python
+      state: present
+
+  - name: Starting MariaDB service
+    ansible.builtin.systemd:
+      state: started
+      name: mariadb
+
+  - name: Update mysql root password
+    mysql_user: name=root host=localhost password={{ mysql_root_password }} login_user=root login_password="{{ mysql_root_password }}" check_implicit_admin=yes priv="*.*:ALL,GRANT"  
+
+  - name: Removing anonymous MySQL server user for localhost
+    action: mysql_user user="" host=localhost state=absent login_user=root login_password="{{ mysql_root_password }}"
+  
+  - name: Removing all anonymous user accounts
+    action: mysql_user user="" host_all=yes state=absent login_user=root login_password="{{ mysql_root_password }}"
+
+  - name: Removing the MySQL test database
+    action: mysql_db db=test state=absent login_user=root login_password="{{ mysql_root_password }}"
+
+  - name: Creating DB 'mediawiki'
+    mysql_db: name=mediawiki state=present login_user=root login_password="{{ mysql_root_password }}"  
+
+  - name: Create DB user 'wiki'
+    mysql_user: name=wiki password="{{ mysql_wiki_password }}" priv='mediawiki.*:ALL' state=present login_user=root login_password="{{ mysql_root_password }}"
+
+  - name: Downloading mediawiki
+    get_url:
+        url: https://releases.wikimedia.org/mediawiki/1.36/mediawiki-1.36.1.tar.gz
+        dest: /home/ec2-user
+        mode: 0550
+
+  - name: Extracting mediawiki tar
+    command: "tar -zxf /home/ec2-user/mediawiki-1.36.1.tar.gz"
+
+  - name: Copying the contents to /var/www/
+    command: "cp -r /home/ec2-user/mediawiki-1.36.1 /var/www/"
+
+  - name: Creating The Softlink
+    command: "ln -s /var/www/mediawiki-1.36.1/ /var/www/mediawiki"
+
+  - name: Modifying the permissions
+    command: "chown -R apache:apache /var/www/mediawiki-1.36.1"
+
+  - name: Modifying the permissions
+    command: "chown -R apache:apache /var/www/mediawiki"
+
+  - name: Changing DocumentRoot in apache conf
+    lineinfile: 
+      path: /etc/httpd/conf/httpd.conf
+      regexp: 'DocumentRoot "/var/www/html"' 
+      line: 'DocumentRoot "/var/www"'
+      backrefs: yes
+
+  - name: Adding new directory block to apache conf
+    blockinfile:
+      dest: /etc/httpd/conf/httpd.conf
+      block: |
+        <Directory "/var/www/mediawiki">
+        DirectoryIndex index.html index.html.var index.php
+        </Directory>
+      backup: yes
+
+  - name: Restarting apache service
+    ansible.builtin.systemd:
+      state: restarted
+      name: httpd
